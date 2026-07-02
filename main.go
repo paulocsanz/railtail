@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -52,9 +51,11 @@ func main() {
 		slog.String("ts-state-dir", filepath.Join(cfg.TSStateDirPath, "railtail")),
 	)
 
-	listener, err := net.Listen("tcp", listenAddr)
+	// Reversed from upstream: we need a tailnet-facing listener forwarding
+	// to a Railway-private target, not the other way around — see tcp.go.
+	listener, err := ts.Listen("tcp", listenAddr)
 	if err != nil {
-		logger.StderrWithSource.Error("failed to start local listener", logger.ErrAttr(err))
+		logger.StderrWithSource.Error("failed to start tailnet listener", logger.ErrAttr(err))
 		os.Exit(1)
 	}
 
@@ -113,9 +114,10 @@ func main() {
 		logger.Stdout.Info("forwarding tcp connection", forwardingInfo...)
 
 		go func() {
-			if err := fwdTCP(conn, ts, cfg.TargetAddr); err != nil {
+			if err := fwdTCP(conn, cfg.TargetAddr); err != nil {
 				logger.StderrWithSource.Error("forwarding failed", append([]any{logger.ErrAttr(err)}, forwardingInfo...)...)
 			}
 		}()
 	}
 }
+

@@ -7,35 +7,39 @@ import (
 	"net"
 
 	"golang.org/x/sync/errgroup"
-	"tailscale.com/tsnet"
 )
 
-func fwdTCP(lstConn net.Conn, ts *tsnet.Server, targetAddr string) error {
+// Reversed from upstream: upstream forwards a Railway-network-facing
+// listener out to a tailnet target (net.Listen + ts.Dial). We need the
+// opposite — a tailnet-facing listener forwarding to a Railway-private
+// target (ts.Listen + plain net.Dial) — see main.go.
+func fwdTCP(lstConn net.Conn, targetAddr string) error {
 	defer lstConn.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	tsConn, err := ts.Dial(ctx, "tcp", targetAddr)
+	var dialer net.Dialer
+	targetConn, err := dialer.DialContext(ctx, "tcp", targetAddr)
 	if err != nil {
-		return fmt.Errorf("failed to dial tailscale node: %w", err)
+		return fmt.Errorf("failed to dial target: %w", err)
 	}
 
-	defer tsConn.Close()
+	defer targetConn.Close()
 
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		if _, err := io.Copy(tsConn, lstConn); err != nil {
-			return fmt.Errorf("failed to copy data to tailscale node: %w", err)
+		if _, err := io.Copy(targetConn, lstConn); err != nil {
+			return fmt.Errorf("failed to copy data to target: %w", err)
 		}
 
 		return nil
 	})
 
 	g.Go(func() error {
-		if _, err := io.Copy(lstConn, tsConn); err != nil {
-			return fmt.Errorf("failed to copy data from tailscale node: %w", err)
+		if _, err := io.Copy(lstConn, targetConn); err != nil {
+			return fmt.Errorf("failed to copy data from target: %w", err)
 		}
 
 		return nil
