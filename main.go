@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/half0wl/railtail/internal/config"
 	"github.com/half0wl/railtail/internal/logger"
 
+	"tailscale.com/net/socks5"
 	"tailscale.com/tsnet"
 )
 
@@ -44,12 +46,49 @@ func main() {
 	listenAddr := "[::]:" + cfg.ListenPort
 
 	logger.Stdout.Info("🚀 Starting railtail",
+		slog.String("mode", string(cfg.Mode)),
 		slog.String("ts-hostname", cfg.TSHostname),
 		slog.String("listen-addr", listenAddr),
 		slog.String("target-addr", cfg.TargetAddr),
 		slog.String("ts-login-server", cmp.Or(cfg.TSLoginServer, "using_default")),
 		slog.String("ts-state-dir", filepath.Join(cfg.TSStateDirPath, "railtail")),
 	)
+
+	// RFC 0101 P1-5: ModeSocks5 is the SAME direction upstream railtail
+	// originally used before we reversed it for the federation-api bridge
+	// below — a plain Railway-private-facing listener (net.Listen, NOT
+	// ts.Listen), dialing OUT into the tailnet per-connection instead of
+	// forwarding to one fixed target. Composes tailscale.com's own
+	// net/socks5 package with tsnet.Server.Dial — both are official
+	// Tailscale packages we already depend on; no new protocol code.
+	// procurador (or any Railway-private caller) points its SOCKS5 client
+	// at this listener and can then reach ANY tailnet peer per-request,
+	// unlike ModeForward's single fixed TargetAddr.
+	if cfg.Mode == config.ModeSocks5 {
+		socksListener, err := net.Listen("tcp", listenAddr)
+		if err != nil {
+			logger.StderrWithSource.Error("failed to start socks5 listener", logger.ErrAttr(err))
+			os.Exit(1)
+		}
+
+		socksServer := &socks5.Server{
+			Logf: func(format string, args ...any) {
+				logger.Stdout.Info(fmt.Sprintf(format, args...))
+			},
+			Dialer: ts.Dial,
+		}
+
+		logger.Stdout.Info("running in socks5 mode (RAILTAIL_MODE=socks5) — arbitrary tailnet dial, no fixed target",
+			slog.String("listen-addr", listenAddr),
+		)
+
+		if err := socksServer.Serve(socksListener); err != nil {
+			logger.StderrWithSource.Error("socks5 server failed", logger.ErrAttr(err))
+			os.Exit(1)
+		}
+
+		return
+	}
 
 	// Reversed from upstream: we need a tailnet-facing listener forwarding
 	// to a Railway-private target, not the other way around — see tcp.go.
@@ -120,4 +159,3 @@ func main() {
 		}()
 	}
 }
-
